@@ -52,6 +52,7 @@ export const config = {
   walletKey: process.env.GATECHECK_WALLET_KEY || null,
   spotcheckUrl: process.env.SPOTCHECK_URL || "https://api.402xagent.com/v1/products/endpoint-spot-check",
   spotcheckClient: process.env.SPOTCHECK_CLIENT || "gatecheck",
+  spotcheckRef: process.env.SPOTCHECK_REF && /^[A-Za-z0-9._-]{1,64}$/.test(process.env.SPOTCHECK_REF) ? process.env.SPOTCHECK_REF : null,
   spotcheckPayTo: "0x37cfCC8a29e9ff9458902B29E31E42dc7B718674",
   spotcheckNetwork: "eip155:8453", // 402xAgent settles on Base mainnet, exact scheme
 

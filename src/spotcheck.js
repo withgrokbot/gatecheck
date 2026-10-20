@@ -50,6 +50,7 @@ async function liveSpotCheck(url, { fetchImpl = fetch } = {}) {
   const paidUrl = new URL(config.spotcheckUrl);
   paidUrl.searchParams.set("url", url);
   paidUrl.searchParams.set("client", config.spotcheckClient);
+  if (config.spotcheckRef) paidUrl.searchParams.set("ref", config.spotcheckRef);
   const challenge = await fetchImpl(config.spotcheckUrl, { method: "GET", headers: { accept: "application/json" } });
   if (challenge.status !== 402) {
     throw new Error(`spot-check: expected 402, got ${challenge.status}`);
@@ -126,7 +127,9 @@ async function liveSpotCheck(url, { fetchImpl = fetch } = {}) {
     receiptId: verdict.receipt_id || (verdict.receipt_url ? String(verdict.receipt_url).split("/").pop() : null),
     tx: verdict.access?.tx || null,
     simulated: false,
-    spentAtomic: toAtomic("0.02"),
+    // 402xAgent may answer from the free tier even when a payment header is sent; then nothing was charged.
+    paid: (verdict.access?.tier || verdict.access_tier) === "paid",
+    spentAtomic: (verdict.access?.tier || verdict.access_tier) === "paid" ? toAtomic("0.02") : 0n,
     detail: verdict,
   };
 }
