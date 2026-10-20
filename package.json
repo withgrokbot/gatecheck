@@ -14,8 +14,9 @@
   "main": "src/server.js",
   "name": "gatecheck",
   "scripts": {
-    "start": "node src/server.js",
-    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+    "start": "node --max-http-header-size=65536 src/server.js",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "drill": "node --max-http-header-size=65536 scripts/drill.mjs"
   },
   "type": "module",
   "version": "0.1.0"

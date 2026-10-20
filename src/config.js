@@ -50,7 +50,8 @@ export const config = {
   spotcheckMode: process.env.SPOTCHECK_MODE === "live" ? "live" : "dryrun",
   spotcheckApiKey: process.env.SPOTCHECK_API_KEY || null,
   walletKey: process.env.GATECHECK_WALLET_KEY || null,
-  spotcheckUrl: "https://api.402xagent.com/v1/lookup/paid",
+  spotcheckUrl: process.env.SPOTCHECK_URL || "https://api.402xagent.com/v1/products/endpoint-spot-check",
+  spotcheckClient: process.env.SPOTCHECK_CLIENT || "gatecheck",
   spotcheckPayTo: "0x37cfCC8a29e9ff9458902B29E31E42dc7B718674",
   spotcheckNetwork: "eip155:8453", // 402xAgent settles on Base mainnet, exact scheme
 

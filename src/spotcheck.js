@@ -44,11 +44,13 @@ async function liveSpotCheck(url, { fetchImpl = fetch } = {}) {
   const account = privateKeyToAccount(config.walletKey);
 
   // 1. Unpaid request -> 402 challenge (authoritative terms from the envelope).
-  const challenge = await fetchImpl(config.spotcheckUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ url }),
-  });
+  // endpoint-spot-check answers a bare GET (no ?url=) with its x402 v2 challenge and never spends a free check;
+  // a GET with ?url= would use the free tier first and answer 200. Its PAYMENT-REQUIRED header is ~29 KB, so Node
+  // must run with --max-http-header-size=65536 (npm start / npm run drill set it).
+  const paidUrl = new URL(config.spotcheckUrl);
+  paidUrl.searchParams.set("url", url);
+  paidUrl.searchParams.set("client", config.spotcheckClient);
+  const challenge = await fetchImpl(config.spotcheckUrl, { method: "GET", headers: { accept: "application/json" } });
   if (challenge.status !== 402) {
     throw new Error(`spot-check: expected 402, got ${challenge.status}`);
   }
@@ -68,6 +70,8 @@ async function liveSpotCheck(url, { fetchImpl = fetch } = {}) {
 
   // 4. Sign EIP-3009 authorization for the exact challenged amount.
   const value = BigInt(envelope.amount);
+  // Never sign more than the published price, whatever the challenge asks.
+  if (value <= 0n || value > config.spotcheckCost) throw new Error(`spot-check: challenge amount ${value} exceeds the ${config.spotcheckCost} cap`);
   const nowSec = Math.floor(Date.now() / 1000);
   const nonce = `0x${[...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
   const authorization = {
@@ -90,33 +94,25 @@ async function liveSpotCheck(url, { fetchImpl = fetch } = {}) {
     message: authorization,
   });
 
-  const payment = {
-    x402Version: envelope.x402Version,
-    scheme: "exact",
-    network: envelope.network,
-    payload: {
-      signature,
-      authorization: {
-        from: authorization.from,
-        to: authorization.to,
-        value: authorization.value.toString(),
-        validAfter: authorization.validAfter.toString(),
-        validBefore: authorization.validBefore.toString(),
-        nonce: authorization.nonce,
-      },
-    },
+  const auth = {
+    from: authorization.from,
+    to: authorization.to,
+    value: authorization.value.toString(),
+    validAfter: authorization.validAfter.toString(),
+    validBefore: authorization.validBefore.toString(),
+    nonce: authorization.nonce,
   };
+  // v2 carries the accepted requirement and resource; v1 the flat scheme/network shape.
+  const accepted = (envelope.raw.accepts || [])[0];
+  const payment = envelope.x402Version === 2 || envelope.x402Version === "2"
+    ? { x402Version: 2, resource: envelope.raw.resource, accepted, payload: { signature, authorization: auth } }
+    : { x402Version: 1, scheme: "exact", network: envelope.network, payload: { signature, authorization: auth } };
   const paymentB64 = Buffer.from(JSON.stringify(payment)).toString("base64");
 
   // 5. Paid request.
-  const paid = await fetchImpl(config.spotcheckUrl, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      [proofHeader]: paymentB64,
-      ...(config.spotcheckApiKey ? { "x-api-key": config.spotcheckApiKey } : {}),
-    },
-    body: JSON.stringify({ url }),
+  const paid = await fetchImpl(paidUrl.toString(), {
+    method: "GET",
+    headers: { accept: "application/json", [proofHeader]: paymentB64 },
   });
   if (!paid.ok) {
     const text = await paid.text().catch(() => "");
@@ -127,6 +123,8 @@ async function liveSpotCheck(url, { fetchImpl = fetch } = {}) {
     verdict: verdict.verdict || "unknown",
     reason: verdict.reason_code || verdict.reason || "unknown",
     receiptUrl: verdict.receiptUrl || verdict.receipt_url || null,
+    receiptId: verdict.receipt_id || (verdict.receipt_url ? String(verdict.receipt_url).split("/").pop() : null),
+    tx: verdict.access?.tx || null,
     simulated: false,
     spentAtomic: toAtomic("0.02"),
     detail: verdict,
