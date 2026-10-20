@@ -71,6 +71,8 @@ export const config = {
   signingKeyB64: process.env.GATECHECK_SIGNING_KEY || null,
   keysUrlPath: "/.well-known/gatecheck-keys.json",
   dataDir: new URL("../data/", import.meta.url),
+  // SQLite file for idempotency, free-tier counters and treasury state. One file per treasury (see db.js).
+  dbPath: process.env.GATECHECK_DB || new URL("../data/gatecheck.db", import.meta.url).pathname,
 };
 
 if (!process.env.GATECHECK_PAY_TO) {

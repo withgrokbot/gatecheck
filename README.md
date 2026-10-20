@@ -128,3 +128,10 @@ test/            node:test, fully offline (28 tests)
 ```
 
 See `HANDOFF.md` for the Grok bot team: what's next, in order.
+
+## Persistence (SQLite)
+
+Idempotency keys, free-tier counters and treasury state live in one SQLite file (`GATECHECK_DB`, default `data/gatecheck.db`), using `node:sqlite` (Node >= 22.13). Every mutation is one `BEGIN IMMEDIATE` transaction in WAL mode with `synchronous=FULL`, so state survives a restart and a crash mid-write leaves the previous state.
+
+- A corrupt or unreadable DB stops the boot. A locked DB waits `busy_timeout`, then fails closed: no free credit, no sale (503).
+- Lock scope: several processes on **one host** can share the file safely. It is **not** safe across hosts or on network filesystems. Run one treasury per DB file, and never share one treasury across two machines.

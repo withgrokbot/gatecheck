@@ -19,7 +19,7 @@ export const PAUSE_REASONS = {
   KILL_SWITCH: "kill_switch",
 };
 
-export function createTreasury({ now = () => Date.now(), overrides = {} } = {}) {
+export function createTreasury({ now = () => Date.now(), overrides = {}, db = null } = {}) {
   // Injectable for tests; production always uses config.
   const priceFull = overrides.priceFull ?? config.priceFull;
   const priceLite = overrides.priceLite ?? config.priceLite;
@@ -47,6 +47,28 @@ export function createTreasury({ now = () => Date.now(), overrides = {} } = {}) 
     freeSpendAtomic: 0n,
   };
 
+  // Persistence (optional). State is one JSON row; every operation runs load -> mutate -> save inside one
+  // BEGIN IMMEDIATE transaction, so a crash mid-write leaves the previous state and two processes on one
+  // host serialize. Without db the treasury is in-memory exactly as before.
+  const BIG = ["seedAtomic", "earnedAtomic", "spentAtomic", "simulatedSpentAtomic", "liteLossAtomic", "freeSpendAtomic"];
+  const load = () => {
+    const row = db.prepare("SELECT state FROM treasury WHERE id = 1").get();
+    if (!row) return false;
+    const j = JSON.parse(row.state);
+    for (const k of BIG) j[k] = BigInt(j[k]);
+    Object.assign(state, j);
+    if (config.killAtBoot && !state.killed) { state.killed = true; state.killLog.push({ at: new Date(now()).toISOString(), reason: "env at boot" }); }
+    return true;
+  };
+  const save = () => {
+    const j = { ...state };
+    for (const k of BIG) j[k] = state[k].toString();
+    db.prepare("INSERT INTO treasury (id, state, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at").run(JSON.stringify(j), now());
+  };
+  const mut = (fn) => (db ? db.tx(() => { load(); const out = fn(); save(); return out; }) : fn());
+  const read = (fn) => (db ? db.tx(() => { load(); return fn(); }) : fn());
+  if (db) db.tx(() => { load(); save(); });
+
   const rollDay = () => {
     const d = dayKey(now());
     if (d !== state.day) {
@@ -69,6 +91,9 @@ export function createTreasury({ now = () => Date.now(), overrides = {} } = {}) 
 
     /** Gate every sale. Returns { ok } or { ok:false, reason }. */
     checkSale(kind /* "full" | "lite" | "free" */) {
+      return mut(() => this._checkSale(kind));
+    },
+    _checkSale(kind) {
       rollDay();
       if (state.killed) return { ok: false, reason: PAUSE_REASONS.KILL_SWITCH };
       if (state.paused) return { ok: false, reason: state.pauseReason };
@@ -99,7 +124,10 @@ export function createTreasury({ now = () => Date.now(), overrides = {} } = {}) 
     },
 
     /** Record a completed sale AFTER fulfillment. */
-    recordSale({ kind, priceAtomic, upstreamAtomic, simulated = false }) {
+    recordSale(sale) {
+      return mut(() => this._recordSale(sale));
+    },
+    _recordSale({ kind, priceAtomic, upstreamAtomic, simulated = false }) {
       rollDay();
       state.sales += 1;
       state.earnedAtomic += priceAtomic;
@@ -111,11 +139,17 @@ export function createTreasury({ now = () => Date.now(), overrides = {} } = {}) 
     },
 
     kill(reason = "admin") {
+      return mut(() => this._kill(reason));
+    },
+    _kill(reason) {
       state.killed = true;
       state.killLog.push({ at: new Date(now()).toISOString(), reason });
       console.warn(`[treasury] KILL SWITCH engaged — ${reason}`);
     },
     resume() {
+      return mut(() => this._resume());
+    },
+    _resume() {
       state.killed = false;
       state.paused = false;
       state.pauseReason = null;
@@ -125,6 +159,9 @@ export function createTreasury({ now = () => Date.now(), overrides = {} } = {}) 
 
     /** STUB: computes the sweepable profit and logs it. Moves no funds. */
     sweepProfits(ownerWallet) {
+      return read(() => this._sweepProfits(ownerWallet));
+    },
+    _sweepProfits(ownerWallet) {
       const reserve = 0n; // PoC: no refund reserve yet (refunds are manual)
       const sweepable = state.earnedAtomic - state.spentAtomic - reserve;
       const result = {
@@ -138,7 +175,15 @@ export function createTreasury({ now = () => Date.now(), overrides = {} } = {}) 
       return result;
     },
 
+    /** Re-read persisted state (another process may have changed it). No-op without db. */
+    refresh() {
+      if (db) read(() => {});
+      return state;
+    },
     summary() {
+      return mut(() => this._summary());
+    },
+    _summary() {
       rollDay();
       const fmt = (n) => fromAtomic(n);
       return {

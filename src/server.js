@@ -17,18 +17,22 @@ import { createTreasury, PAUSE_REASONS } from "./treasury.js";
 import { fulfillReport } from "./pipeline.js";
 import { loadKeys, keysDocument, verifyReceipt } from "./receipts.js";
 import { readFile } from "node:fs/promises";
+import { openDb } from "./db.js";
 
 const app = express();
 app.use(express.json({ limit: "64kb" }));
 app.set("trust proxy", 1);
 
-const treasury = createTreasury();
-const idem = createIdempotencyStore();
-const freeTier = createFreeTier({ perDay: config.freePerDay });
+// Persistent state (SQLite). A corrupt/unreadable DB stops the boot: no sales on unknown state.
+const db = openDb(config.dbPath);
+const treasury = createTreasury({ db });
+const idem = createIdempotencyStore({ db });
+const freeTier = createFreeTier({ perDay: config.freePerDay, db });
 
 // ---- helpers -------------------------------------------------------------
 
 const salesBlocked = () => {
+  treasury.refresh();
   if (treasury.state.killed) return { blocked: true, reason: PAUSE_REASONS.KILL_SWITCH };
   if (treasury.state.paused) return { blocked: true, reason: treasury.state.pauseReason };
   return { blocked: false };
@@ -46,7 +50,9 @@ async function handleSale(req, res, kind) {
     return res.status(503).json({ error: "sales_paused", reason: gate.reason });
   }
   const key = idemKey(req);
-  const replay = key && idem.check(key);
+  let replay;
+  try { replay = key && idem.check(key); }
+  catch { return res.status(503).json({ error: "store_unavailable" }); }
   if (replay) {
     // Retried purchase: original receipt, no second fulfillment, no second charge.
     return res.status(replay.status).json({ ...replay.body, idempotentReplay: true });
@@ -54,6 +60,12 @@ async function handleSale(req, res, kind) {
   const { url } = req.body || {};
   if (!url || typeof url !== "string") {
     return res.status(400).json({ error: "bad_request", detail: "JSON body needs { url }" });
+  }
+  let claimed = false;
+  try { claimed = idem.claim(key); }
+  catch { return res.status(503).json({ error: "store_unavailable" }); }
+  if (!claimed) {
+    return res.status(409).json({ error: "in_progress", detail: "a request with this Idempotency-Key is already being fulfilled" });
   }
   try {
     // At this point the x402 middleware has verified the buyer's payment
@@ -63,6 +75,7 @@ async function handleSale(req, res, kind) {
     if (key) idem.store(key, 200, body);
     return res.status(200).json(body);
   } catch (e) {
+    try { idem.release(key); } catch { /* the 24h TTL clears a stuck claim */ }
     // Fulfillment failed AFTER a verified payment: the money moved but the
     // report didn't. Manual review (dispute flow is stubbed in the PoC).
     console.error("[gatecheck] fulfillment failed post-payment for %s: %s", String(url), String(e?.message || e));
@@ -131,6 +144,11 @@ app.post("/v1/report", (req, res, next) => fullReportPaywall(req, res, next), (r
 
 // Lite verdict: free-tier gate first; paid x402 path otherwise.
 app.post("/v1/verdict", (req, res, next) => {
+  // A replayed Idempotency-Key returns the stored answer without spending a free credit.
+  const key = idemKey(req);
+  let hit = null;
+  try { hit = key && idem.check(key); } catch { return res.status(503).json({ error: "store_unavailable" }); }
+  if (hit) return res.status(hit.status).json({ ...hit.body, idempotentReplay: true });
   if (freeTier.tryConsume(req)) {
     req.freeTier = true;
     return handleSale(req, res, "free");
