@@ -55,8 +55,11 @@ export function createTreasury({ now = () => Date.now(), overrides = {}, db = nu
     const row = db.prepare("SELECT state FROM treasury WHERE id = 1").get();
     if (!row) return false;
     const j = JSON.parse(row.state);
-    for (const k of BIG) j[k] = BigInt(j[k]);
-    Object.assign(state, j);
+    // Copy only the fields this treasury owns (never arbitrary keys from the row).
+    for (const k of Object.keys(state)) {
+      if (!Object.prototype.hasOwnProperty.call(j, k)) continue;
+      state[k] = BIG.includes(k) ? BigInt(j[k]) : j[k];
+    }
     if (config.killAtBoot && !state.killed) { state.killed = true; state.killLog.push({ at: new Date(now()).toISOString(), reason: "env at boot" }); }
     return true;
   };
